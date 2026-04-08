@@ -262,11 +262,9 @@ func (m model) renderPanel() string {
 	progressRow := stepStr + "  " + barStr + "  " + pctStr
 
 	// ── Timing row — rolling avg rate + braille sparkline
-	sps := 0.0
-	if m.elapsed > 0 && m.step > 0 {
-		sps = m.elapsed / float64(m.step) // global avg fallback
-	}
-	avgSps := sps
+	// Use only interval-derived rates — never elapsed/step, which is wrong on
+	// resume (elapsed resets to 0 but step continues from the checkpoint).
+	avgSps := 0.0
 	if len(m.stepRates) > 0 {
 		avgSps = rollingAvg(m.stepRates, 20) // 20-eval rolling avg
 	}
@@ -275,10 +273,14 @@ func (m model) renderPanel() string {
 	if avgSps > 0 {
 		etaStr = formatDuration(remaining * avgSps)
 	}
+	spsStr := "—"
+	if avgSps > 0 {
+		spsStr = fmt.Sprintf("%.2fs/step", avgSps)
+	}
 	sparkWidth := 20
 	spark := brailleSpark(m.stepRates, sparkWidth)
-	timingRow := fmt.Sprintf("  Elapsed: %s   ETA: %s   %.2fs/step  %s",
-		formatDuration(m.elapsed), etaStr, avgSps, spark)
+	timingRow := fmt.Sprintf("  Elapsed: %s   ETA: %s   %s  %s",
+		formatDuration(m.elapsed), etaStr, spsStr, spark)
 
 	// ── LR row
 	lrRow := "  LR    : —"
