@@ -458,6 +458,34 @@ module Rinzler
         topo.reverse_each(&:_backward)
       end
 
+      # ── Graph management ─────────────────────────────────────────────────────
+
+      # Release the computation graph after backward is complete.
+      #
+      # Walks all nodes reachable from self and nils out their backward procs
+      # and children references. This allows Ruby's GC to collect every
+      # intermediate tensor immediately rather than waiting for the next
+      # training step to overwrite the `loss` variable.
+      #
+      # Only `data` and `grad` survive — which is all the optimizer needs.
+      # Call this after loss.backward and before reading loss.data.
+      NOOP           = -> {}
+      EMPTY_CHILDREN = [].freeze
+
+      def free_graph!
+        visited = {}
+        stack   = [self]
+        until stack.empty?
+          node = stack.pop
+          next if visited[node.object_id]
+          visited[node.object_id] = true
+          stack.concat(node.children)
+          node.instance_variable_set(:@children,  EMPTY_CHILDREN)
+          node.instance_variable_set(:@_backward, NOOP)
+        end
+        self
+      end
+
       # ── Support ───────────────────────────────────────────────────────────────
 
       def coerce(other) = [Tensor.new(other), self]

@@ -236,6 +236,7 @@ last_step   = start_step
   scheduler.zero_grad
   loss = model.loss(batch)
   loss.backward
+  loss.free_graph!
   opt.clip_grad_norm!(options[:clip_grad]) if options[:clip_grad]
   scheduler.step
 

@@ -24,7 +24,7 @@ module Rinzler
       end
 
       def zero_grad
-        @parameters.each { |p| p.grad = Numo::DFloat.zeros(*p.shape) }
+        @parameters.each { |p| p.grad.fill(0.0) }
       end
 
       # Clip gradients by global L2 norm.
