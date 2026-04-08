@@ -37,6 +37,7 @@ options = {
   div_warn:      20,    # warn when gap% exceeds this value (20 = 20%)
   div_crit:      nil,   # abort training when gap% exceeds this value (50 = 50%; nil = disabled)
   warmup_steps:  0,     # linear LR warmup steps (0 = disabled)
+  cosine:        false, # use CosineWithWarmup instead of LinearWarmup
   clip_grad:     1.0    # gradient clipping max norm (nil = disabled)
 }
 
@@ -56,6 +57,7 @@ OptionParser.new do |o|
   o.on("--div-warn N",    Float)   { |v| options[:div_warn]      = v }
   o.on("--div-crit N",    Float)   { |v| options[:div_crit]      = v }
   o.on("--warmup-steps N", Integer) { |v| options[:warmup_steps] = v }
+  o.on("--cosine")                 { |_| options[:cosine]        = true }
   o.on("--clip-grad N",   Float)   { |v| options[:clip_grad]     = v }
   o.on("--no-clip-grad")           { |_| options[:clip_grad]     = nil }
   o.on("--out PATH")              { |v| options[:out]        = v }
@@ -191,7 +193,13 @@ puts "  Optimizer: AdamW, lr=#{options[:lr]}, weight_decay=0.1 (Loshchilov & Hut
 opt = Rinzler::Optim::AdamW.new(model.parameters, lr: options[:lr], weight_decay: 0.1)
 opt.load_checkpoint_state!(opt_state) if options[:resume] && opt_state
 
-if options[:warmup_steps] > 0
+if options[:warmup_steps] > 0 && options[:cosine]
+  scheduler = Rinzler::Optim::CosineWithWarmup.new(opt,
+    warmup_steps: options[:warmup_steps],
+    total_steps:  options[:steps]
+  )
+  puts "  LR schedule: cosine with #{options[:warmup_steps]}-step warmup over #{options[:steps]} total steps."
+elsif options[:warmup_steps] > 0
   scheduler = Rinzler::Optim::LinearWarmup.new(opt, warmup_steps: options[:warmup_steps])
   puts "  LR schedule: linear warmup over #{options[:warmup_steps]} steps → #{options[:lr]}."
 else

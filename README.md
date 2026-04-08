@@ -74,27 +74,32 @@ GPT-2 style transformer:
 - Binary checkpoint format: weights and optimizer moments as raw float bytes + JSON sidecar for metadata. Legacy JSON-only format still loads.
 - Graceful shutdown: `SIGINT`/`SIGTERM` sets a flag, training finishes the current step and saves a checkpoint before exiting.
 
-**Training:**
+**All scripts run from the monorepo root** so Bundler resolves inter-gem dependencies correctly:
 
 ```bash
+# Find the fastest batch_size × OMP_NUM_THREADS combo before committing to a long run
+bundle exec ruby rinzler-gpt/autotune.rb --vulkan
+
 # Fresh run
-bundle exec ruby train.rb \
-  --corpus "corpus/*.txt" \
+bundle exec ruby rinzler-gpt/train.rb \
+  --corpus "rinzler-gpt/corpus/*.txt" \
   --steps 50000 \
   --vocab-size 1000 \
   --warmup-steps 500 \
+  --cosine \
   --div-crit 50 \
   --gen-every 500 \
   --vulkan
 
 # Resume
-bundle exec ruby train.rb \
-  --corpus "corpus/*.txt" \
+bundle exec ruby rinzler-gpt/train.rb \
+  --corpus "rinzler-gpt/corpus/*.txt" \
   --steps 100000 \
   --vocab-size 1000 \
   --warmup-steps 500 \
+  --cosine \
   --div-crit 50 \
-  --resume runs/4/checkpoint_step15000.json \
+  --resume rinzler-gpt/runs/4/checkpoint_step15000.json \
   --vulkan
 ```
 
@@ -109,7 +114,8 @@ Key flags:
 | `--d-model N` | 64 | Embedding dimension |
 | `--layers N` | 4 | Transformer blocks |
 | `--vocab-size N` | 500 | BPE merge count |
-| `--warmup-steps N` | 0 | Linear LR warmup steps |
+| `--warmup-steps N` | 0 | LR warmup steps |
+| `--cosine` | off | Cosine decay after warmup (requires `--warmup-steps`) |
 | `--clip-grad N` | 1.0 | Gradient clipping max norm |
 | `--no-clip-grad` | — | Disable gradient clipping |
 | `--gen-every N` | 200 | Steps between text samples |
@@ -119,6 +125,10 @@ Key flags:
 | `--vulkan` | off | Use GPU backend |
 | `--resume PATH` | — | Resume from checkpoint (.json or .bin) |
 | `--corpus PATTERN` | corpus.txt | Repeatable glob |
+
+**Autotune** (`rinzler-gpt/autotune.rb`):
+
+Benchmarks `batch_size` × `OMP_NUM_THREADS` combinations over a short fixed run, measures tokens/sec, and emits the optimal `train.rb` invocation. Accepts `--batch-sizes "4,8,16,32"`, `--threads "1,2,4"`, `--steps N`, `--vulkan`.
 
 **Corpus** (`rinzler-gpt/corpus/`):
 - `corpus.txt` — _why's Poignant Guide to Ruby
@@ -167,8 +177,8 @@ Run 4 is in progress: 1000-merge BPE vocabulary, full corpus (_why + Chris Pine 
 - Model is small by current standards (64d); coherent generation but limited range
 
 ### Deferred
-- System auto-tuning: benchmark `batch_size` × `OMP_NUM_THREADS` and emit optimal config
-- `CosineWithWarmup` wired into `train.rb` (scheduler exists, `LinearWarmup` is the default)
+- KV cache for O(T) generation (currently O(T²) per token)
+- `CosineWithWarmup` resume support: `total_steps` should account for `start_step` on resume
 
 ## Dependencies
 
