@@ -1,0 +1,98 @@
+Loading corpus...
+  287982 characters
+Training tokenizer...
+  vocab size: 106
+  287982 tokens
+
+Building model...
+  221.8k parameters
+  batch size: 8
+
+Training...
+
+step 100/3000 | train: 3.0556 | val: 3.2254 | 95.8s
+step 200/3000 | train: 2.8352 | val: 2.8098 | 193.3s
+step 300/3000 | train: 2.8208 | val: 2.6211 | 294.5s
+step 400/3000 | train: 2.6586 | val: 2.8565 | 394.0s
+step 500/3000 | train: 2.6468 | val: 2.8281 | 489.1s
+
+--- sample at step 500 ---
+The ithnd g oryompthe ouand ste nd end tkibloperon omed bettotopud othst gtherlo8thicherible ouyhoomang ks.goully whe g ame sit b thpr rd bind thehergay s wheran at Thonts ical
+wiabe an as tsath athe soflis ouan arid kimuet tge ave toorue t s s bous rd ithol_nd f titre athis the anot. tecthe Imeyos Be e
+---
+
+step 600/3000 | train: 2.6601 | val: 2.6585 | 599.3s
+step 700/3000 | train: 2.7145 | val: 2.7431 | 696.3s
+step 800/3000 | train: 2.5868 | val: 2.7168 | 793.9s
+step 900/3000 | train: 2.4966 | val: 2.8429 | 897.8s
+step 1000/3000 | train: 2.5707 | val: 2.5683 | 1005.3s
+
+--- sample at step 1000 ---
+The the mate ar ofaboutech, thes se romt theathe of udingreronerithe a whe f gese. “8
+bor. fofe selarer tomauthiceaste tofrth tin’ve s ta areaupre ifinst lin the idethad vale t atrlaingely mee ritoabin’sp. e waowhans alt tofr be ha theere d t iled e an towhourabe ha vanspe theathin whe by, tho te bangvi
+---
+
+step 1100/3000 | train: 2.5403 | val: 2.7026 | 1115.4s
+step 1200/3000 | train: 2.4497 | val: 2.5919 | 1209.0s
+step 1300/3000 | train: 2.4373 | val: 2.6285 | 1302.2s
+step 1400/3000 | train: 2.4948 | val: 2.5803 | 1395.6s
+step 1500/3000 | train: 2.4381 | val: 2.7093 | 1489.2s
+
+--- sample at step 1500 ---
+The cles he ghars tos anat plond s mantaks fo wong o sipll ove punthind obing a wou ce ther pendemer of pern anthatand thexthet
+d thita f sepyeear yound ntreahind ag malsthe touren the meryes
+han nttind ing f oumontotthe
+ciy seras de wand trace reensnkir ar paunll acacins arying in ixals weth Ruly 'shin
+---
+
+step 1600/3000 | train: 2.4071 | val: 2.7252 | 1598.3s
+step 1700/3000 | train: 2.4937 | val: 2.5159 | 1691.6s
+step 1800/3000 | train: 2.4454 | val: 2.6482 | 1784.7s
+step 1900/3000 | train: 2.4402 | val: 2.3983 | 1878.1s
+step 2000/3000 | train: 2.2305 | val: 2.3924 | 1981.7s
+
+--- sample at step 2000 ---
+The bit’cent. I that mi_ ningpucif an corin iteams sof aitif coredeshf thed wherite an firingls, had thens ay meverid beting ouy wix mpore a thee iters 15’s athind re as ashatey, chareacp brerach geatelly. “Hed strily gan harused your if and thesed ankind thes atlog athe shan gom thined wes sanallle.
+
+
+---
+
+step 2100/3000 | train: 2.3428 | val: 2.2793 | 2097.6s
+step 2200/3000 | train: 2.3296 | val: 2.4433 | 2194.8s
+step 2300/3000 | train: 2.2787 | val: 2.1536 | 2293.9s
+step 2400/3000 | train: 2.2442 | val: 2.2737 | 2391.9s
+step 2500/3000 | train: 2.1387 | val: 2.2651 | 2491.5s
+
+--- sample at step 2500 ---
+The bat sot tith sre amying munkere to the len anend tab pones of the
+id jud wis whe next strell and a of icke arlle ark is the down stotere ond ithe gon to dithe at.
+
+
+“1419)      #   noit metewowll ithe tho you stroe divetint amend of haring lottheres
+goonnt, we the its yo end cdhiciong. Chom at lese 
+---
+
+step 2600/3000 | train: 2.2465 | val: 2.5462 | 2603.8s
+step 2700/3000 | train: 2.1306 | val: 2.2384 | 2700.6s
+step 2800/3000 | train: 2.2809 | val: 2.3191 | 2799.7s
+step 2900/3000 | train: 2.1835 | val: 2.2496 | 2903.3s
+step 3000/3000 | train: 2.1832 | val: 2.1818 | 3000.7s
+
+--- sample at step 3000 ---
+The Ronk.
+
+Wery. Which bewat ond of deout wfithicting revers foreard freathibles tree fomes a indear counce arumarine and beorss carased sely cof trimpe theit list rigntir,  smrins the %nents
+a a be plicck, Wher’ig ond in b) send you @ttheren the in platiction hat s)
+are % lever the to bring oht
+ye and 
+---
+
+
+Training complete in 3015.8s
+Tokenizer saved.
+
+--- Final generation ---
+Ruby is Sto are tring the and a kof UT, itter opter offer. He was wawnd toir. _ho you lase the to a upre read hricht onk of the He sts thimptouart kniof, and tree liks athe a starce cheat clies ime athod strurke fow pie hastis ichmmeres retad ous tticaters in the this aster.
+
+
+“The bew _o it lit s youre hal

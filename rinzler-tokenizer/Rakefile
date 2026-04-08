@@ -1,0 +1,11 @@
+# frozen_string_literal: true
+
+require "bundler/gem_tasks"
+require "rake/extensiontask"
+
+Rake::ExtensionTask.new("bpe_ext") do |ext|
+  ext.ext_dir = "ext/rinzler/tokenizer"
+  ext.lib_dir = "lib/rinzler/tokenizer"
+end
+
+task default: %i[compile]

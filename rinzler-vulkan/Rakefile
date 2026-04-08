@@ -1,0 +1,13 @@
+# frozen_string_literal: true
+
+require "bundler/gem_tasks"
+require "rake/extensiontask"
+
+Rake::ExtensionTask.new("vulkan_ext") do |ext|
+  ext.name        = "vulkan_ext"
+  ext.ext_dir     = "ext/rinzler/vulkan"
+  ext.lib_dir     = "lib/rinzler/vulkan"
+  ext.source_pattern = "*.c"
+end
+
+task default: :compile

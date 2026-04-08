@@ -1,0 +1,18 @@
+# frozen_string_literal: true
+
+source "https://rubygems.org"
+
+# Specify your gem's dependencies in rinzler-gpt.gemspec
+gemspec
+
+gem "rinzler-tensor",    path: "../rinzler-tensor"
+gem "rinzler-vulkan",    path: "../rinzler-vulkan"
+gem "rinzler-nn",        path: "../rinzler-nn"
+gem "rinzler-optim",     path: "../rinzler-optim"
+gem "rinzler-tokenizer", path: "../rinzler-tokenizer"
+gem "numo-narray",       path: "/home/matrix9180/Projects/numo-narray"
+gem "numo-linalg"
+gem "fiddle"
+
+gem "irb"
+gem "rake", "~> 13.0"

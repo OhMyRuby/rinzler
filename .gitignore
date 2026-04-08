@@ -1,0 +1,33 @@
+# ── Checkpoints & runs ────────────────────────────────────────────────────────
+rinzler-gpt/runs/
+rinzler-gpt/*.bin
+rinzler-gpt/tokenizer_*.json
+rinzler-gpt/training_*.log
+rinzler-gpt/model_tokenizer.json
+
+# ── Corpus (large text files, not source) ─────────────────────────────────────
+rinzler-gpt/corpus/*.txt
+rinzler-gpt/corpus/*.pdf
+
+# ── Ruby / Bundler ─────────────────────────────────────────────────────────────
+.bundle/
+vendor/bundle/
+*.gem
+
+# ── Native extensions ─────────────────────────────────────────────────────────
+rinzler-vulkan/tmp/
+rinzler-vulkan/*.so
+rinzler-vulkan/*.bundle
+**/*.o
+**/*.spirv
+
+# ── Tooling ────────────────────────────────────────────────────────────────────
+.yardoc/
+_yardoc/
+/coverage/
+/doc/
+/pkg/
+/spec/reports/
+/tmp/
+*.swp
+.DS_Store
