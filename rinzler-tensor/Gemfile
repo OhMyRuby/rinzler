@@ -2,14 +2,7 @@
 
 source "https://rubygems.org"
 
-# Specify your gem's dependencies in rinzler-tensor.gemspec
 gemspec
-
-# Use local fork until ruby-numo/numo-narray#246 is merged and released
-gem "numo-narray", path: "/home/matrix9180/Projects/numo-narray"
 
 gem "irb"
 gem "rake", "~> 13.0"
-
-# Optional GPU backend — comment out if Vulkan is unavailable
-gem "rinzler-vulkan", path: "/home/matrix9180/Projects/rinzler/rinzler-vulkan"
