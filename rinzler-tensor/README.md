@@ -108,7 +108,10 @@ Approximate backward time distribution per step:
 
 Note: numo `reshape` returns a copy, not a view, so flat-index tricks don't work for in-place grad modification — the 2D iteration is the correct approach.
 
+## Gradient buffer allocation
+
+All backward closures use `self.grad.inplace + delta` — no backward path reassigns `@grad` to a new NArray. Combined with the optimizer's `zero_grad` using `grad.fill(0.0)`, parameter tensors' grad NArrays are allocated exactly once (at construction) and reused for the entire training run. No GC pressure on parameter grads across steps.
+
 ## Future optimization paths
 
-- **Pre-allocated gradient buffers** — currently `@grad` is initialized to zeros at Tensor construction and accumulated into via `inplace +`. A "double-buffer" scheme that reuses the same NArray across steps (zero it in `zero_grad!` rather than reallocating) would eliminate GC pressure on parameter tensors entirely.
 - **Larger d_model** — most matmuls are below the BLAS threshold (256) at d_model=64. Increasing d_model to 128+ would route the QKV projection and FFN layers through OpenBLAS, giving a significant speedup on the dominant ops.

@@ -353,8 +353,8 @@ module Rinzler
 
         # Gradient is 1 where the input was positive, 0 where it was clamped.
         out._set_backward do
-          mask      = Numo::DFloat.cast(@data > 0)
-          self.grad = self.grad + mask * out.grad
+          mask = Numo::DFloat.cast(@data > 0)
+          self.grad.inplace + (mask * out.grad)
         end
 
         out
@@ -365,7 +365,7 @@ module Rinzler
         out = Tensor.new(t, children: [self], op: :tanh)
 
         out._set_backward do
-          self.grad = self.grad + (1.0 - t ** 2) * out.grad
+          self.grad.inplace + ((1.0 - t ** 2) * out.grad)
         end
 
         out
@@ -376,7 +376,7 @@ module Rinzler
         out = Tensor.new(e, children: [self], op: :exp)
 
         # e^x is its own derivative.
-        out._set_backward { self.grad = self.grad + e * out.grad }
+        out._set_backward { self.grad.inplace + (e * out.grad) }
 
         out
       end
@@ -385,7 +385,7 @@ module Rinzler
         out = Tensor.new(Numo::NMath.log(@data), children: [self], op: :log)
 
         out._set_backward do
-          self.grad = self.grad + (1.0 / @data) * out.grad
+          self.grad.inplace + ((1.0 / @data) * out.grad)
         end
 
         out
@@ -415,8 +415,8 @@ module Rinzler
         out = Tensor.new(y, children: [self], op: :log_softmax)
 
         out._set_backward do
-          sum_dy    = out.grad.sum(last_axis).reshape(*expand_shape)
-          self.grad = self.grad + out.grad - softmax_x * sum_dy
+          sum_dy = out.grad.sum(last_axis).reshape(*expand_shape)
+          self.grad.inplace + (out.grad - softmax_x * sum_dy)
         end
 
         out
@@ -445,8 +445,8 @@ module Rinzler
         out = Tensor.new(s, children: [self], op: :softmax)
 
         out._set_backward do
-          dot_gs    = (out.grad * s).sum(last_axis).reshape(*expand_shape)
-          self.grad = self.grad + s * (out.grad - dot_gs)
+          dot_gs = (out.grad * s).sum(last_axis).reshape(*expand_shape)
+          self.grad.inplace + (s * (out.grad - dot_gs))
         end
 
         out
