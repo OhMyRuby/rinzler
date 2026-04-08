@@ -59,12 +59,22 @@ module Rinzler
     # through millions of individual numbers one at a time, we run it through
     # a handful of matrix operations in batch.
     class Tensor
-      attr_accessor :data, :grad
-      attr_reader :children, :op
+      attr_accessor :data
+      attr_writer   :grad
+      attr_reader   :children, :op
+
+      # Lazy grad reader: allocate zeros on first access rather than at
+      # construction. The forward pass never reads grad, so intermediate
+      # tensors pay zero allocation cost until backward actually needs them.
+      # Parameter tensors get their NArray on the first zero_grad or first
+      # backward accumulation and reuse it for the entire training run.
+      def grad
+        @grad ||= Numo::DFloat.zeros(*@data.shape)
+      end
 
       def initialize(data, children: [], op: nil)
         @data      = coerce_data(data)
-        @grad      = Numo::DFloat.zeros(*@data.shape)
+        @grad      = nil
         @children  = children
         @op        = op
         @_backward = -> {}
