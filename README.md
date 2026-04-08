@@ -122,7 +122,7 @@ Key flags:
 | `--save-every N` | 500 | Steps between checkpoints |
 | `--div-warn N` | 20 | Warn when train/val gap exceeds N% |
 | `--div-crit N` | — | Stop when train/val gap exceeds N% |
-| `--vulkan` | off | Use GPU backend |
+| `--vulkan` | off | Use GPU backend (see note below) |
 | `--resume PATH` | — | Resume from checkpoint (.json or .bin) |
 | `--corpus PATTERN` | corpus.txt | Repeatable glob |
 
@@ -138,7 +138,7 @@ Benchmarks `batch_size` × `OMP_NUM_THREADS` combinations over a short fixed run
 ### `rinzler-vulkan`
 Optional GPU compute backend via Vulkan compute shaders. Implements tiled 16×16 GEMM on the GPU using a GLSL compute shader compiled to SPIR-V at gem build time.
 
-Crossover point on integrated AMD graphics: ~n=512. The vocabulary projection layer (`[B×T, d_model] × [d_model, vocab_size]`) is the primary beneficiary during training. Large inference batches benefit most.
+**When to use it:** Vulkan only helps when matrix dimensions exceed the serialization overhead of the Ruby→GPU→Ruby transfer. Benchmarked crossover on integrated AMD graphics: ~n=512. For the default small model (d_model=64), Vulkan is **2.4× slower** than CPU — every matmul pays the transfer cost for matrices that OpenBLAS handles faster natively. Only add `--vulkan` if you scale up to d_model ≥ 256 or larger batch sizes where the vocabulary projection (`[B×T, d_model] × [d_model, vocab_size]`) becomes the dominant cost. Run `autotune.rb` with and without `--vulkan` to confirm before committing to a long run.
 
 **Requirements:** `vulkan-headers`, `vulkan-icd-loader` (or `vulkan-radeon`), `shaderc` (for `glslc`).
 
@@ -168,7 +168,7 @@ bundle exec rake compile
 - Divergence monitor: configurable warn/stop thresholds on train/val gap
 
 ### What's been trained
-Run 4 is in progress: 1000-merge BPE vocabulary, full corpus (_why + Chris Pine + Pickaxe), step ~15k of 50k. Generation at step 13.5k shows correct Ruby token patterns and rough prose structure.
+Run 8 is in progress: 1000-merge BPE vocabulary, full corpus (_why + Chris Pine + Pickaxe), 100k steps. At step 5k, generation shows emerging Ruby sentence structure and correct use of method/block/argument terminology. Running on CPU at ~0.51s/step (~14h total).
 
 ### Known limitations
 - No KV cache — generation is O(T²) per token
