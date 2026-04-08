@@ -10,6 +10,7 @@
 # After enough steps, it generates text that sounds like _why.
 
 require_relative "lib/rinzler/gpt"
+require_relative "lib/rinzler/dashboard"
 require "optparse"
 require "fileutils"
 
@@ -18,27 +19,27 @@ $stdout.sync = true  # flush immediately when piped
 # ── Config ─────────────────────────────────────────────────────────────────────
 
 options = {
-  corpus:     [File.join(__dir__, "corpus.txt")],
-  steps:      1000,
-  lr:         3e-4,
-  batch_size: 8,
-  eval_every: 100,
-  gen_every:  200,
-  gen_len:    200,
-  context:    128,
-  d_model:    64,
-  n_heads:    4,
-  n_layers:   4,
-  save_every: 500,
-  out:        nil,   # resolved after option parsing — nil means "auto"
-  resume:     nil,
-  vocab_size: 500,   # number of BPE merges; total vocab ≈ unique_chars + vocab_size
-  div_window:    5,     # number of eval steps to look back when computing Δgap trend
-  div_warn:      20,    # warn when gap% exceeds this value (20 = 20%)
-  div_crit:      nil,   # abort training when gap% exceeds this value (50 = 50%; nil = disabled)
-  warmup_steps:  0,     # linear LR warmup steps (0 = disabled)
-  cosine:        false, # use CosineWithWarmup instead of LinearWarmup
-  clip_grad:     1.0    # gradient clipping max norm (nil = disabled)
+  corpus:        [File.join(__dir__, "corpus/*.txt")],
+  steps:         100_000,
+  lr:            3e-4,
+  batch_size:    8,
+  eval_every:    100,
+  gen_every:     500,
+  gen_len:       200,
+  context:       128,
+  d_model:       64,
+  n_heads:       4,
+  n_layers:      4,
+  save_every:    500,
+  out:           nil,    # resolved after option parsing — nil means "auto"
+  resume:        nil,
+  vocab_size:    1000,   # number of BPE merges; total vocab ≈ unique_chars + vocab_size
+  div_window:    5,      # number of eval steps to look back when computing Δgap trend
+  div_warn:      20,     # warn when gap% exceeds this value (20 = 20%)
+  div_crit:      50,     # abort training when gap% exceeds this value (50 = 50%)
+  warmup_steps:  500,    # linear LR warmup steps
+  cosine:        true,   # use CosineWithWarmup
+  clip_grad:     1.0     # gradient clipping max norm (nil = disabled)
 }
 
 OptionParser.new do |o|
@@ -66,7 +67,7 @@ OptionParser.new do |o|
   o.on("--vulkan")                { |_| options[:vulkan]            = true }
   o.on("--corpus PATTERN") do |v|
     # First explicit --corpus clears the default; subsequent ones append.
-    options[:corpus] = [] if options[:corpus] == [File.join(__dir__, "corpus.txt")]
+    options[:corpus] = [] if options[:corpus] == [File.join(__dir__, "corpus/*.txt")]
     options[:corpus] << v
   end
 end.parse!
@@ -213,6 +214,14 @@ puts "  Gradient clipping: max_norm=#{options[:clip_grad]}." if options[:clip_gr
 puts "\nTraining — #{options[:steps]} steps, cross-entropy loss, next-token prediction.\n\n"
 start_time = Time.now
 
+dashboard = Rinzler::Dashboard.new(
+  total_steps: options[:steps],
+  start_step:  start_step,
+  run_dir:     File.dirname(File.expand_path(options[:out])),
+  start_time:  start_time
+)
+dashboard.start!
+
 # Graceful shutdown on SIGINT (Ctrl-C) or SIGTERM.
 # Sets a flag rather than raising — the loop checks it at the end of each step
 # and breaks cleanly, then falls through to the final checkpoint save.
@@ -237,7 +246,7 @@ last_step   = start_step
   loss = model.loss(batch)
   loss.backward
   loss.free_graph!
-  opt.clip_grad_norm!(options[:clip_grad]) if options[:clip_grad]
+  grad_norm = opt.clip_grad_norm!(options[:clip_grad]) if options[:clip_grad]
   scheduler.step
 
   loss_val = loss.data.sum.round(4)
@@ -252,23 +261,36 @@ last_step   = start_step
     gap_pct = loss_val > 0 ? (gap / loss_val * 100.0).round(1) : 0.0
 
     # Trend: change in gap vs div_window evals ago
-    trend_str = ""
+    trend_delta = nil
     if div_history.size >= options[:div_window]
-      prev_gap  = div_history[-options[:div_window]][:gap]
-      delta     = (gap - prev_gap).round(4)
-      arrow     = delta > 0 ? "↑" : (delta < 0 ? "↓" : "→")
-      trend_str = " | Δgap/#{options[:div_window]}: #{delta > 0 ? "+" : ""}#{delta}#{arrow}"
+      prev_gap    = div_history[-options[:div_window]][:gap]
+      trend_delta = (gap - prev_gap).round(4)
     end
 
-    warn_str = gap_pct > options[:div_warn] ? " ⚠  generalization gap #{gap_pct}% — model is beginning to memorise training distribution" : ""
+    warning  = gap_pct > options[:div_warn]
+    critical = options[:div_crit] && gap_pct > options[:div_crit]
 
-    puts "step #{step + 1}/#{options[:steps]} | train: #{loss_val} | val: #{val_loss} | gap: #{gap > 0 ? "+" : ""}#{gap} (#{gap_pct}%)#{trend_str} | #{elapsed}s#{warn_str}"
+    current_lr = scheduler.respond_to?(:lr) ? scheduler.lr : options[:lr]
+
+    dashboard.update(
+      step:      step + 1,
+      train:     loss_val,
+      val:       val_loss,
+      gap:       gap,
+      gap_pct:   gap_pct,
+      trend:     trend_delta,
+      lr:        current_lr,
+      grad_norm: grad_norm,
+      elapsed:   elapsed,
+      warning:   warning,
+      critical:  critical
+    )
 
     div_history << { step: step + 1, train: loss_val, val: val_loss, gap: gap }
 
-    if options[:div_crit] && gap_pct > options[:div_crit]
-      puts "\nStopping early — divergence #{gap_pct}% exceeds critical threshold #{options[:div_crit]}% at step #{step + 1}."
-      puts "The train/val gap has widened past the point where continued training is likely to improve generalisation."
+    if critical
+      dashboard.emit("\nStopping early — divergence #{gap_pct}% exceeds critical threshold #{options[:div_crit]}% at step #{step + 1}.")
+      dashboard.emit("The train/val gap has widened past the point where continued training is likely to improve generalisation.")
       stop_requested = true
     end
   end
@@ -278,9 +300,9 @@ last_step   = start_step
     prompt = tokenizer.encode("The ")
     ids    = model.generate(prompt, max_new_tokens: options[:gen_len], temperature: 0.8)
     sample = tokenizer.decode(ids)
-    puts "\n--- sample at step #{step + 1} (temperature=0.8, autoregressive) ---"
-    puts sample
-    puts "---\n\n"
+    dashboard.emit("\n--- sample at step #{step + 1} (temperature=0.8, autoregressive) ---")
+    dashboard.emit(sample)
+    dashboard.emit("---\n")
   end
 
   # ── Checkpoint ───────────────────────────────────────────────────────────────
@@ -288,18 +310,19 @@ last_step   = start_step
     ckpt = options[:out].sub(".json", "_step#{step + 1}.json")
     model.save_checkpoint(ckpt, step: step + 1, optimizer: opt)
     tokenizer.save(ckpt.sub(".json", "_tokenizer.json"))
-    puts "Checkpoint: #{ckpt}"
+    dashboard.emit("Checkpoint: #{ckpt}")
   end
 
   last_step = step + 1
 
   if stop_requested
-    puts "\nSignal received — stopping after step #{last_step}."
+    dashboard.emit("\nSignal received — stopping after step #{last_step}.")
     break
   end
 end
 
 elapsed = (Time.now - start_time).round(1)
+dashboard.stop!
 puts "\nTraining complete in #{elapsed}s."
 
 model.save_checkpoint(options[:out], step: last_step, optimizer: opt)
