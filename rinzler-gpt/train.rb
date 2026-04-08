@@ -117,6 +117,15 @@ unless options[:corpus].empty?
   end
 end
 
+# Extensions excluded from every Rails app corpus — JS/React/CSS frontend files.
+# These are rarely useful for a Ruby-centric model and Mastodon in particular has
+# a large React frontend that would otherwise dominate the distribution.
+RAILS_EXCLUDED_EXTS = %w[
+  .js .jsx .ts .tsx .mjs .cjs
+  .css .scss .sass .less
+  .svg
+].to_set.freeze
+
 # Rails app corpus — enumerate via git ls-files, prepend path headers
 (options[:rails] || []).each do |app_path|
   unless Dir.exist?(app_path) && Dir.exist?(File.join(app_path, ".git"))
@@ -129,10 +138,16 @@ end
   tracked = `git -C #{Shellwords.escape(app_path)} ls-files`.split("\n")
   app_chars = 0
   included  = 0
+  skipped_js = 0
 
   tracked.each do |rel_path|
     full = File.join(app_path, rel_path)
     next unless File.file?(full)
+
+    if RAILS_EXCLUDED_EXTS.include?(File.extname(rel_path).downcase)
+      skipped_js += 1
+      next
+    end
 
     raw = File.binread(full)
     # Skip binary files — heuristic: >10% non-UTF8-printable bytes in first 8KB
@@ -150,7 +165,8 @@ end
     included  += 1
   end
 
-  puts "    #{included}/#{tracked.size} files, #{app_chars} chars"
+  skip_note = skipped_js > 0 ? ", #{skipped_js} JS/CSS skipped" : ""
+  puts "    #{included}/#{tracked.size} files, #{app_chars} chars#{skip_note}"
 end
 
 raise "No corpus content found" if corpus.empty?
@@ -193,8 +209,21 @@ unless tokenizer
   puts "  Tokenizer ready — #{tokenizer.vocab_size} tokens. Saved to #{tokenizer_cache}."
 end
 
-all_ids = tokenizer.encode(corpus)
-puts "  #{all_ids.size} tokens total. Train/val split: 90/10."
+# Cache encoded token IDs alongside the tokenizer — encoding is O(merges × corpus)
+# and dominates startup time on large corpora. The result is deterministic given the
+# same tokenizer, so we only re-encode when the tokenizer is retrained.
+ids_cache = tokenizer_cache.sub(".json", "_ids.bin")
+
+if !options[:retrain_tokenizer] && File.exist?(ids_cache)
+  raw = File.binread(ids_cache)
+  all_ids = raw.unpack("l<*")  # little-endian int32
+  puts "  #{all_ids.size} tokens loaded from cache. Train/val split: 90/10."
+else
+  puts "  Encoding corpus..."
+  all_ids = tokenizer.encode(corpus)
+  File.binwrite(ids_cache, all_ids.pack("l<*"))
+  puts "  #{all_ids.size} tokens total. Saved to #{ids_cache}. Train/val split: 90/10."
+end
 
 # Split 90/10 train/val
 split      = (all_ids.size * 0.9).to_i

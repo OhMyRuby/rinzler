@@ -27,6 +27,7 @@ Gem::Specification.new do |spec|
   spec.bindir = "exe"
   spec.executables = spec.files.grep(%r{\Aexe/}) { |f| File.basename(f) }
   spec.require_paths = ["lib"]
+  spec.extensions    = ["ext/rinzler/tensor/extconf.rb"]
 
   spec.add_dependency "logger"
   spec.add_dependency "numo-narray", "~> 0.9"

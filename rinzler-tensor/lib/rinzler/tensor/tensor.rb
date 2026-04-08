@@ -96,8 +96,8 @@ module Rinzler
         # broadcasting, we must sum the gradient back over the broadcast axes
         # so it matches the original shape.
         out._set_backward do
-          self.grad  = self.grad  + unbroadcast(out.grad, shape)
-          other.grad = other.grad + unbroadcast(out.grad, other.shape)
+          self.grad.inplace  + unbroadcast(out.grad, shape)
+          other.grad.inplace + unbroadcast(out.grad, other.shape)
         end
 
         out
@@ -110,8 +110,8 @@ module Rinzler
         # Element-wise multiply: d(a*b)/da = b, d(a*b)/db = a.
         # Same broadcast handling as addition.
         out._set_backward do
-          self.grad  = self.grad  + unbroadcast(other.data * out.grad, shape)
-          other.grad = other.grad + unbroadcast(@data * out.grad, other.shape)
+          self.grad.inplace  + unbroadcast(other.data * out.grad, shape)
+          other.grad.inplace + unbroadcast(@data * out.grad, other.shape)
         end
 
         out
@@ -126,7 +126,7 @@ module Rinzler
 
         out = Tensor.new(@data ** exp, children: [self], op: :"**#{exp}")
         out._set_backward do
-          self.grad = self.grad + (exp * @data ** (exp - 1)) * out.grad
+          self.grad.inplace + (exp * @data ** (exp - 1)) * out.grad
         end
         out
       end
@@ -151,8 +151,8 @@ module Rinzler
         out = Tensor.new(c_data, children: [self, other], op: :dot)
 
         out._set_backward do
-          self.grad  = self.grad  + mat_dot(out.grad, other.data.transpose)
-          other.grad = other.grad + mat_dot(@data.transpose, out.grad)
+          self.grad.inplace  + mat_dot(out.grad, other.data.transpose)
+          other.grad.inplace + mat_dot(@data.transpose, out.grad)
         end
 
         out
@@ -169,25 +169,37 @@ module Rinzler
       #   dL/dA[i] = dL/dC[i] · B[i]ᵀ
       #   dL/dB[i] = A[i]ᵀ · dL/dC[i]
       def bmm(other)
-        other  = coerce_tensor(other)
-        b      = shape[0]
-        slices = if Rinzler::Tensor.backend == :vulkan
-                   (0...b).map { |i| Rinzler::Vulkan.matmul(@data[i, true, true], other.data[i, true, true]) }
-                 else
-                   (0...b).map { |i| mat_dot(@data[i, true, true], other.data[i, true, true]) }
-                 end
+        other = coerce_tensor(other)
+        b     = shape[0]
 
-        result = Numo::DFloat.zeros(b, slices[0].shape[0], slices[0].shape[1])
-        slices.each_with_index { |s, i| result[i, true, true] = s }
+        result = if Rinzler::Tensor.backend == :vulkan
+                   slices = (0...b).map { |i| Rinzler::Vulkan.matmul(@data[i, true, true], other.data[i, true, true]) }
+                   r = Numo::DFloat.zeros(b, slices[0].shape[0], slices[0].shape[1])
+                   slices.each_with_index { |s, i| r[i, true, true] = s }
+                   r
+                 elsif TENSOR_NATIVE
+                   Rinzler::Tensor::TensorExt.bmm(@data, other.data)
+                 else
+                   slices = (0...b).map { |i| mat_dot(@data[i, true, true], other.data[i, true, true]) }
+                   r = Numo::DFloat.zeros(b, slices[0].shape[0], slices[0].shape[1])
+                   slices.each_with_index { |s, i| r[i, true, true] = s }
+                   r
+                 end
 
         out = Tensor.new(result, children: [self, other], op: :bmm)
 
         out._set_backward do
-          b.times do |i|
-            self.grad[i, true, true]  = self.grad[i, true, true]  +
-              mat_dot(out.grad[i, true, true], other.data[i, true, true].transpose)
-            other.grad[i, true, true] = other.grad[i, true, true] +
-              mat_dot(@data[i, true, true].transpose, out.grad[i, true, true])
+          if TENSOR_NATIVE
+            # dA = dC × Bᵀ,  dB = Aᵀ × dC — same batched kernel, transposed args
+            self.grad.inplace  + Rinzler::Tensor::TensorExt.bmm(out.grad, other.data.transpose(0, 2, 1))
+            other.grad.inplace + Rinzler::Tensor::TensorExt.bmm(@data.transpose(0, 2, 1), out.grad)
+          else
+            b.times do |i|
+              self.grad[i, true, true]  = self.grad[i, true, true]  +
+                mat_dot(out.grad[i, true, true], other.data[i, true, true].transpose)
+              other.grad[i, true, true] = other.grad[i, true, true] +
+                mat_dot(@data[i, true, true].transpose, out.grad[i, true, true])
+            end
           end
         end
 
@@ -207,13 +219,13 @@ module Rinzler
 
         out._set_backward do
           if axis.nil?
-            self.grad = self.grad + Numo::DFloat.ones(*@data.shape) * out.grad
+            # out.grad is scalar — numo broadcasts it to fill @data.shape in-place
+            self.grad.inplace + out.grad
           else
             # Re-insert the collapsed axis so numo can broadcast back
-            expanded_shape        = @data.shape.dup
-            expanded_shape[axis]  = 1
-            expanded  = out.grad.reshape(*expanded_shape)
-            self.grad = self.grad + Numo::DFloat.ones(*@data.shape) * expanded
+            expanded_shape       = @data.shape.dup
+            expanded_shape[axis] = 1
+            self.grad.inplace + out.grad.reshape(*expanded_shape)
           end
         end
 
@@ -227,12 +239,11 @@ module Rinzler
 
         out._set_backward do
           if axis.nil?
-            self.grad = self.grad + Numo::DFloat.ones(*@data.shape) * (out.grad / n)
+            self.grad.inplace + (out.grad / n)
           else
-            expanded_shape        = @data.shape.dup
-            expanded_shape[axis]  = 1
-            expanded  = out.grad.reshape(*expanded_shape)
-            self.grad = self.grad + Numo::DFloat.ones(*@data.shape) * (expanded / n)
+            expanded_shape       = @data.shape.dup
+            expanded_shape[axis] = 1
+            self.grad.inplace + (out.grad.reshape(*expanded_shape) / n)
           end
         end
 
@@ -254,9 +265,7 @@ module Rinzler
         out = Tensor.new(@data[*idx], children: [self], op: :slice_cols)
 
         out._set_backward do
-          full_grad      = self.grad.dup
-          full_grad[*idx] = full_grad[*idx] + out.grad
-          self.grad      = full_grad
+          self.grad[*idx] = self.grad[*idx] + out.grad
         end
 
         out
@@ -292,7 +301,7 @@ module Rinzler
             w   = t.shape[last]
             idx = Array.new(n, 0..-1)
             idx[last] = offset...(offset + w)
-            t.grad = t.grad + out.grad[*idx]
+            t.grad.inplace + out.grad[*idx]
             offset += w
           end
         end
@@ -305,7 +314,7 @@ module Rinzler
         out = Tensor.new(@data.reshape(*new_shape), children: [self], op: :reshape)
 
         out._set_backward do
-          self.grad = self.grad + out.grad.reshape(*original_shape)
+          self.grad.inplace + out.grad.reshape(*original_shape)
         end
 
         out
@@ -313,7 +322,7 @@ module Rinzler
 
       def transpose
         out = Tensor.new(@data.transpose, children: [self], op: :transpose)
-        out._set_backward { self.grad = self.grad + out.grad.transpose }
+        out._set_backward { self.grad.inplace + out.grad.transpose }
         out
       end
 
@@ -327,7 +336,7 @@ module Rinzler
         axes[-2], axes[-1] = axes[-1], axes[-2]
 
         out = Tensor.new(@data.transpose(*axes), children: [self], op: :transpose_last2)
-        out._set_backward { self.grad = self.grad + out.grad.transpose(*axes) }
+        out._set_backward { self.grad.inplace + out.grad.transpose(*axes) }
         out
       end
 

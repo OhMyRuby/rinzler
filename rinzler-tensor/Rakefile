@@ -1,4 +1,11 @@
 # frozen_string_literal: true
 
 require "bundler/gem_tasks"
-task default: %i[]
+require "rake/extensiontask"
+
+Rake::ExtensionTask.new("tensor_ext") do |ext|
+  ext.lib_dir = "lib/rinzler/tensor"
+  ext.ext_dir = "ext/rinzler/tensor"
+end
+
+task default: %i[compile]

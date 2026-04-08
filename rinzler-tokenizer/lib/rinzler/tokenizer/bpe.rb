@@ -75,28 +75,11 @@ module Rinzler
         corpus = text.lines.map { |line| line.chars.map { |c| @stoi[c] } }
                            .reject(&:empty?)
 
-        report_every = [num_merges / 10, 1].max
-
-        num_merges.times do |i|
-          pairs = count_pairs(corpus)
-          break if pairs.empty?
-
-          best_pair = pairs.max_by { |_, count| count }.first
-
-          new_token = @itos[best_pair[0]] + @itos[best_pair[1]]
-          new_id    = @stoi.size
-          register(new_token, new_id)
-          @merges[best_pair] = new_id
-
-          corpus = corpus.map { |seq| merge_pair(seq, best_pair, new_id) }
-
-          if (i + 1) % report_every == 0 || i + 1 == num_merges
-            pct = ((i + 1) * 100.0 / num_merges).round
-            $stdout.print "\r  BPE: #{i + 1}/#{num_merges} merges (#{pct}%)  vocab=#{@stoi.size}"
-            $stdout.flush
-          end
+        if BPE_NATIVE
+          train_fast_native(corpus, num_merges)
+        else
+          train_slow(corpus, num_merges)
         end
-        $stdout.puts  # newline after the progress line
 
         @vocab_size = @stoi.size
         self
@@ -147,6 +130,44 @@ module Rinzler
       def save(path)           = File.write(path, to_json)
 
       private
+
+      # Fast path: one C call to train_fast returns the merge list in order.
+      # We register each merged token in Ruby (string concatenation + vocab bookkeeping).
+      def train_fast_native(corpus, num_merges)
+        vocab_base = @stoi.size
+        merge_pairs = Rinzler::Tokenizer::BPEExt.train_fast(corpus, num_merges, vocab_base)
+        $stdout.puts  # newline after C's progress line
+
+        merge_pairs.each_with_index do |(a, b), i|
+          new_token = @itos[a] + @itos[b]
+          new_id    = vocab_base + i
+          register(new_token, new_id)
+          @merges[[a, b]] = new_id
+        end
+      end
+
+      # Slow path: pure Ruby, naive O(N × merges). Kept as reference + fallback.
+      def train_slow(corpus, num_merges)
+        report_every = [num_merges / 10, 1].max
+        num_merges.times do |i|
+          pairs = count_pairs(corpus)
+          break if pairs.empty?
+
+          best_pair = pairs.max_by { |_, count| count }.first
+          new_token = @itos[best_pair[0]] + @itos[best_pair[1]]
+          new_id    = @stoi.size
+          register(new_token, new_id)
+          @merges[best_pair] = new_id
+          corpus = corpus.map { |seq| merge_pair(seq, best_pair, new_id) }
+
+          if (i + 1) % report_every == 0 || i + 1 == num_merges
+            pct = ((i + 1) * 100.0 / num_merges).round
+            $stdout.print "\r  BPE: #{i + 1}/#{num_merges} merges (#{pct}%)  vocab=#{@stoi.size}"
+            $stdout.flush
+          end
+        end
+        $stdout.puts
+      end
 
       def register(token, id)
         @stoi[token] = id
