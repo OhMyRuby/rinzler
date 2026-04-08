@@ -202,7 +202,6 @@ module Rinzler
         end
 
         File.write(json_path, JSON.generate(meta))
-        Rinzler.logger.info("Checkpoint saved — step #{step}, path: #{bin_path}")
       end
 
       # Restore a model (and optionally optimizer state) from a checkpoint.
@@ -233,6 +232,7 @@ module Rinzler
         cfg   = Config.new(**meta["config"].transform_keys(&:to_sym))
         model = new(cfg)
 
+        opt_state = nil
         File.open(bin_path, "rb") do |f|
           f.read(4).unpack1("N")   # consume version header
 

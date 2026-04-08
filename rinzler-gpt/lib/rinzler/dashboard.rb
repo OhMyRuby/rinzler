@@ -1,40 +1,44 @@
 # frozen_string_literal: true
 
+require "shellwords"
+
 module Rinzler
   # Terminal TUI dashboard for the training loop.
   #
-  # Uses VT100 scrolling regions to pin a fixed stats panel to the bottom of
+  # Uses VT100 scrolling regions to pin a fixed stats panel to the TOP of
   # the terminal while all freeform output (samples, checkpoints, log lines)
-  # scrolls normally above it.
+  # scrolls normally below it.
   #
   # Degrades gracefully: when stdout is not a TTY (piped to a log file, nohup,
   # etc.) the dashboard becomes a no-op and all output proceeds as plain text.
   #
-  # Layout — 11 fixed lines at the bottom:
+  # Layout — 11 fixed lines at the top:
   #
-  #   ╔══ rinzler-gpt | runs/8/ | 14:22:13 ══╗
-  #   ║  Step  : 5200 / 100000  ████░  5.2%  ║
-  #   ║  Elapsed: 2640s  ETA: ~12h 4m  0.51s ║
-  #   ║  LR    : 2.98e-04                     ║
-  #   ╠═══════════════════════════════════════╣
-  #   ║  Train : 4.2513   Val : 4.9917        ║
-  #   ║  Gap   : +0.74 (17.4%)               ║
-  #   ║  Δgap  : -0.23 ↓    Norm: 0.847      ║
-  #   ║  Status: ✓ OK                         ║
-  #   ╚═══════════════════════════════════════╝
+  #   ╔══ rinzler-gpt | runs/8/ | 14:22:13 ══════════════════════════════════╗
+  #   ║  Step :   5200 / 100000  ████████████████████████░░░░░░░░░░░  5.2%  ║
+  #   ║  Elapsed: 44m 0s   ETA: ~12h 4m   0.51s/step                        ║
+  #   ║  LR    : 2.9800e-04                                                  ║
+  #   ╠══════════════════════════════════════════════════════════════════════╣
+  #   ║  Train : 4.2513   Val : 4.9917                                       ║
+  #   ║  Gap   : +0.7404 (17.4%)                                             ║
+  #   ║  Δgap  : -0.2300↓   Norm: 0.847                                      ║
+  #   ║  Status: ✓ OK                                                        ║
+  #   ╚══════════════════════════════════════════════════════════════════════╝
+  #                      ↑ panel pinned here
+  #   [log output scrolls below]
   #
   class Dashboard
-    HEIGHT = 11   # lines reserved for the panel (including borders)
+    HEIGHT = 10   # lines reserved for the panel (including borders)
 
     # ANSI escape sequences
-    CSI        = "\e["
-    RESET      = "\e[0m"
-    BOLD       = "\e[1m"
-    RED        = "\e[31m"
-    GREEN      = "\e[32m"
-    YELLOW     = "\e[33m"
-    CYAN       = "\e[36m"
-    DIM        = "\e[2m"
+    CSI   = "\e["
+    RESET = "\e[0m"
+    BOLD  = "\e[1m"
+    RED   = "\e[31m"
+    GREEN = "\e[32m"
+    YELLOW = "\e[33m"
+    CYAN  = "\e[36m"
+    DIM   = "\e[2m"
 
     def initialize(total_steps:, start_step:, run_dir:, start_time:)
       @total_steps = total_steps
@@ -42,8 +46,8 @@ module Rinzler
       @run_dir     = File.basename(run_dir)
       @start_time  = start_time
       @tty         = $stdout.isatty
+      @gum         = @tty && system("which gum > /dev/null 2>&1")
 
-      # Current stats — populated by update()
       @step      = start_step
       @train     = nil
       @val       = nil
@@ -52,33 +56,41 @@ module Rinzler
       @trend     = nil
       @grad_norm = nil
       @lr        = nil
+      @elapsed   = nil
       @warning   = false
       @critical  = false
       @rows, @cols = terminal_size
     end
 
-    # Activate the dashboard: set scroll region, draw initial frame.
-    # Registers at_exit to guarantee teardown even on exception.
+    # Activate the dashboard: clear screen, set scroll region below panel, draw frame.
     def start!
       return unless @tty
 
       @rows, @cols = terminal_size
-      set_scroll_region
+      write "\e[2J\e[H"   # clear screen, cursor to home
       draw_frame
+      set_scroll_region
       at_exit { stop! }
+
+      # Reflow on terminal resize
+      Signal.trap("WINCH") do
+        @rows, @cols = terminal_size
+        draw_frame
+        set_scroll_region
+      end
     end
 
-    # Deactivate: reset scroll region, move cursor below panel, final newline.
+    # Deactivate: reset scroll region, move cursor to bottom for clean exit output.
     def stop!
       return unless @tty
 
-      # Reset scroll region to full terminal
-      write "#{CSI}r"
-      # Move below the panel
-      write "#{CSI}#{@rows};1H\n"
+      Signal.trap("WINCH", "DEFAULT")
+      write "#{CSI}r"              # reset scroll region to full terminal
+      write "#{CSI}#{@rows};1H\n" # cursor to last row
+      $stdout.flush
     end
 
-    # Redraw the stats rows with new data. Called every eval_every steps.
+    # Redraw the stats panel with new data. Called every eval_every steps.
     def update(step:, train:, val:, gap:, gap_pct:, trend:, lr:, grad_norm:, elapsed:, warning:, critical: false)
       @step      = step
       @train     = train
@@ -98,13 +110,17 @@ module Rinzler
       draw_frame
     end
 
-    # Emit a line of freeform output (sample text, checkpoint message, etc.)
-    # into the scroll region. In no-TTY mode this is just puts.
-    def emit(text = "")
-      if @tty
-        # Cursor is already positioned at the bottom of the scroll region
-        # (maintained after each draw_frame). Just print — the scroll region
-        # will scroll the text up naturally.
+    # Emit freeform output into the scroll region below the panel.
+    # Accepts an optional :style keyword to select gum styling:
+    #   :sample   — bordered box for generated text samples
+    #   :warn     — yellow warning callout
+    #   :critical — red critical callout
+    #   :info     — dim muted line (checkpoints, saves)
+    # In no-TTY mode this is just puts.
+    def emit(text = "", style: nil)
+      if @tty && @gum && style
+        gum_style(text, style)   # writes directly to stdout via system()
+      elsif @tty
         $stdout.puts text
         $stdout.flush
       else
@@ -117,118 +133,152 @@ module Rinzler
     # ── Drawing ──────────────────────────────────────────────────────────────────
 
     def draw_frame
-      top = @rows - HEIGHT + 1   # first line of the panel
-
       save_cursor
 
-      inner = @cols - 2   # usable width inside borders
+      inner = @cols - 2   # usable width inside the box borders
 
       # Row 0: top border + title
       title     = " rinzler-gpt | #{@run_dir} | #{Time.now.strftime("%H:%M:%S")} "
-      title_pad = inner - title.size
-      goto(top, 1)
-      write "#{CYAN}╔#{title}#{"═" * [title_pad, 0].max}╗#{RESET}"
+      title_pad = [inner - title.size, 0].max
+      goto(1, 1)
+      write "#{CYAN}╔#{title}#{"═" * title_pad}╗#{RESET}"
 
       # Row 1: step + progress bar
-      pct       = @total_steps > 0 ? @step.to_f / @total_steps : 0.0
-      bar_width = [inner - 26, 10].max
+      pct      = @total_steps > 0 ? @step.to_f / @total_steps : 0.0
+      step_str = "  Step : #{@step.to_s.rjust(6)} / #{@total_steps}"
+      pct_str  = "#{(pct * 100).round(1).to_s.rjust(5)}%"
+      bar_width = [inner - step_str.size - pct_str.size - 4, 4].max
       filled    = (pct * bar_width).round
       bar       = "█" * filled + "░" * (bar_width - filled)
-      step_str  = "  Step : #{@step.to_s.rjust(6)} / #{@total_steps}"
-      pct_str   = "#{(pct * 100).round(1).to_s.rjust(5)}%"
-      goto(top + 1, 1)
-      write "#{CYAN}║#{RESET}#{step_str}  #{CYAN}#{bar}#{RESET}  #{pct_str}#{" " * [inner - step_str.size - bar_width - pct_str.size - 3, 0].max}#{CYAN}║#{RESET}"
+      # content = step_str(plain) + "  " + bar(plain) + "  " + pct_str(plain)
+      # total visible = step_str.size + 2 + bar_width + 2 + pct_str.size; pad remainder
+      row1_content = "#{step_str}  #{CYAN}#{bar}#{RESET}  #{pct_str}"
+      goto(2, 1)
+      write "#{CYAN}║#{RESET}#{row1_content}#{" " * [inner - step_str.size - bar_width - pct_str.size - 4, 0].max}#{CYAN}║#{RESET}"
 
       # Row 2: elapsed + ETA + steps/sec
-      elapsed   = @elapsed || (Time.now - @start_time).round(1)
+      elapsed    = @elapsed || (Time.now - @start_time).round(1)
       steps_done = [@step - @start_step, 1].max
       sps        = (steps_done / elapsed.to_f).round(2)
       remaining  = @total_steps - @step
       eta_str    = sps > 0 ? format_eta(remaining / sps) : "?"
       timing     = "  Elapsed: #{format_duration(elapsed)}   ETA: #{eta_str}   #{sps}s/step"
-      goto(top + 2, 1)
-      write "#{CYAN}║#{RESET}#{timing}#{" " * [inner - timing.size, 0].max}#{CYAN}║#{RESET}"
+      goto(3, 1)
+      write box_row(timing, inner)
 
       # Row 3: LR
       lr_str = @lr ? "  LR    : #{format("%.4e", @lr)}" : "  LR    : —"
-      goto(top + 3, 1)
-      write "#{CYAN}║#{RESET}#{lr_str}#{" " * [inner - lr_str.size, 0].max}#{CYAN}║#{RESET}"
+      goto(4, 1)
+      write box_row(lr_str, inner)
 
       # Row 4: divider
-      goto(top + 4, 1)
+      goto(5, 1)
       write "#{CYAN}╠#{"═" * inner}╣#{RESET}"
 
       # Row 5: train + val loss
       loss_str = @train ? "  Train : #{@train.to_s.ljust(8)}  Val : #{@val}" : "  Waiting for first eval..."
-      goto(top + 5, 1)
-      write "#{CYAN}║#{RESET}#{loss_str}#{" " * [inner - loss_str.size, 0].max}#{CYAN}║#{RESET}"
+      goto(6, 1)
+      write box_row(loss_str, inner)
 
-      # Row 6: gap
+      # Row 6: gap (colored — use vis_size for padding)
+      goto(7, 1)
       if @gap
-        gap_color = @warning ? (@critical ? RED : YELLOW) : GREEN
-        gap_str   = "  Gap   : #{@gap >= 0 ? "+" : ""}#{@gap} (#{@gap_pct}%)"
-        goto(top + 6, 1)
-        write "#{CYAN}║#{RESET}#{gap_color}#{gap_str}#{RESET}#{" " * [inner - gap_str.size, 0].max}#{CYAN}║#{RESET}"
+        gap_color   = @warning ? (@critical ? RED : YELLOW) : GREEN
+        gap_plain   = "  Gap   : #{@gap >= 0 ? "+" : ""}#{@gap} (#{@gap_pct}%)"
+        gap_styled  = "#{gap_color}#{gap_plain}#{RESET}"
+        write "#{CYAN}║#{RESET}#{gap_styled}#{" " * [inner - gap_plain.size, 0].max}#{CYAN}║#{RESET}"
       else
-        goto(top + 6, 1)
         write "#{CYAN}║#{" " * inner}║#{RESET}"
       end
 
-      # Row 7: trend + grad norm
-      trend_str = ""
+      # Row 7: trend + grad norm (colored trend — track plain separately)
+      goto(8, 1)
+      trend_plain = ""
+      trend_styled = ""
       if @trend
-        arrow       = @trend < 0 ? "↓" : (@trend > 0 ? "↑" : "→")
-        trend_color = @trend < 0 ? GREEN : (@trend > 0.1 ? RED : YELLOW)
-        trend_val   = "#{@trend >= 0 ? "+" : ""}#{@trend.round(4)}#{arrow}"
-        trend_str   = "  Δgap  : #{trend_color}#{trend_val}#{RESET}"
-        visible_len = "  Δgap  : #{trend_val}".size
+        arrow        = @trend < 0 ? "↓" : (@trend > 0 ? "↑" : "→")
+        trend_color  = @trend < 0 ? GREEN : (@trend > 0.1 ? RED : YELLOW)
+        trend_val    = "#{@trend >= 0 ? "+" : ""}#{@trend.round(4)}#{arrow}"
+        trend_plain  = "  Δgap  : #{trend_val}"
+        trend_styled = "  Δgap  : #{trend_color}#{trend_val}#{RESET}"
       end
-      norm_str = @grad_norm ? "  Norm: #{@grad_norm.round(3)}" : ""
-      row7     = "#{trend_str}#{norm_str}"
-      row7_vis = "#{trend_str.gsub(/\e\[[0-9;]*m/, "")}#{norm_str}"
-      goto(top + 7, 1)
-      write "#{CYAN}║#{RESET}#{row7}#{" " * [inner - row7_vis.size, 0].max}#{CYAN}║#{RESET}"
+      norm_plain  = @grad_norm ? "  Norm: #{@grad_norm.round(3)}" : ""
+      row7_plain  = "#{trend_plain}#{norm_plain}"
+      row7_styled = "#{trend_styled}#{norm_plain}"
+      write "#{CYAN}║#{RESET}#{row7_styled}#{" " * [inner - row7_plain.size, 0].max}#{CYAN}║#{RESET}"
 
-      # Row 8: status
+      # Row 8: status (colored — track plain separately)
+      goto(9, 1)
       if @critical
-        status = "#{RED}#{BOLD}✗ DIVERGING — gap exceeded critical threshold#{RESET}"
-        status_vis = "✗ DIVERGING — gap exceeded critical threshold"
+        status_plain  = "  Status: ✗ DIVERGING — gap exceeded critical threshold"
+        status_styled = "  Status: #{RED}#{BOLD}✗ DIVERGING — gap exceeded critical threshold#{RESET}"
       elsif @warning
-        status = "#{YELLOW}⚠  Generalization gap widening#{RESET}"
-        status_vis = "⚠  Generalization gap widening"
+        status_plain  = "  Status: ⚠  Generalization gap widening"
+        status_styled = "  Status: #{YELLOW}⚠  Generalization gap widening#{RESET}"
       else
-        status = "#{GREEN}✓ OK#{RESET}"
-        status_vis = "✓ OK"
+        status_plain  = "  Status: ✓ OK"
+        status_styled = "  Status: #{GREEN}✓ OK#{RESET}"
       end
-      status_row = "  Status: #{status}"
-      status_vis_row = "  Status: #{status_vis}"
-      goto(top + 8, 1)
-      write "#{CYAN}║#{RESET}#{status_row}#{" " * [inner - status_vis_row.size, 0].max}#{CYAN}║#{RESET}"
+      write "#{CYAN}║#{RESET}#{status_styled}#{" " * [inner - status_plain.size, 0].max}#{CYAN}║#{RESET}"
 
       # Row 9: bottom border
-      goto(top + 9, 1)
+      goto(10, 1)
       write "#{CYAN}╚#{"═" * inner}╝#{RESET}"
 
       restore_cursor
       $stdout.flush
     end
 
-    # Plain text fallback for non-TTY — just prints a compact status line.
+    # Render a plain-text content string as a full-width box row.
+    # Content must contain no ANSI codes — padding derived from content.size directly.
+    def box_row(content, inner)
+      "#{CYAN}║#{RESET}#{content}#{" " * [inner - content.size, 0].max}#{CYAN}║#{RESET}"
+    end
+
+    # Plain text fallback for non-TTY — compact status line via gum log.
     def draw_plain
       return unless @train
-      puts "step #{@step}/#{@total_steps} | train: #{@train} | val: #{@val} | gap: #{@gap >= 0 ? "+" : ""}#{@gap} (#{@gap_pct}%)"
+      line = "step #{@step}/#{@total_steps} | train: #{@train} | val: #{@val} | gap: #{@gap >= 0 ? "+" : ""}#{@gap} (#{@gap_pct}%)"
+      if @gum
+        level = @critical ? "error" : (@warning ? "warn" : "info")
+        system("gum", "log", "--level", level, line)
+      else
+        puts line
+      end
+    end
+
+    # Render styled output via gum, writing directly to stdout.
+    # Uses array-form system() so text with newlines is passed as a single arg
+    # without shell interpretation.
+    def gum_style(text, style)
+      w = (@cols - 4).to_s
+      case style
+      when :sample
+        system("gum", "style",
+               "--border", "rounded", "--border-foreground", "99",
+               "--padding", "0 1", "--width", w, text)
+      when :warn
+        system("gum", "style",
+               "--border", "normal", "--border-foreground", "214",
+               "--foreground", "214", "--padding", "0 1", text)
+      when :critical
+        system("gum", "style",
+               "--border", "double", "--border-foreground", "196",
+               "--foreground", "196", "--bold", "--padding", "0 1", text)
+      when :info
+        system("gum", "style", "--foreground", "240", text)
+      end
+      $stdout.flush
     end
 
     # ── Terminal helpers ──────────────────────────────────────────────────────────
 
     def set_scroll_region
-      scroll_rows = @rows - HEIGHT
-      return if scroll_rows < 3   # terminal too small, skip
+      scroll_start = HEIGHT + 1
+      return if @rows - HEIGHT < 3
 
-      # Set scrolling region to everything above the panel
-      write "#{CSI}1;#{scroll_rows}r"
-      # Move cursor to bottom of scroll region so output appears just above panel
-      write "#{CSI}#{scroll_rows};1H"
+      write "#{CSI}#{scroll_start};#{@rows}r"   # scroll region: below panel → bottom
+      write "#{CSI}#{@rows};1H"                  # cursor to bottom of scroll area
       $stdout.flush
     end
 

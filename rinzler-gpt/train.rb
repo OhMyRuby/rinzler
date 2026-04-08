@@ -126,12 +126,23 @@ if !options[:retrain_tokenizer] && File.exist?(tokenizer_cache)
 end
 
 unless tokenizer
-  puts "\nTraining BPE tokenizer — #{options[:vocab_size]} merges (Sennrich et al., 2015)."
-  puts "  Each merge reduces expected sequence length. Attention is O(n²) in sequence length — this is not cosmetic."
-  puts "  Character-stream BPE (no word boundaries): spaces are first-class citizens in the vocabulary."
-  tokenizer = Rinzler::Tokenizer::BPE.new.train(corpus, num_merges: options[:vocab_size])
+  use_gum = $stdout.isatty && system("which gum > /dev/null 2>&1")
+  if use_gum
+    # Spawn gum spin against a sentinel sleep; kill it when training finishes.
+    spinner_pid = spawn("gum", "spin", "--spinner", "dot",
+                        "--title", " Training BPE tokenizer (#{options[:vocab_size]} merges)...",
+                        "--", "sleep", "9999",
+                        out: :out, err: "/dev/null")
+    tokenizer = Rinzler::Tokenizer::BPE.new.train(corpus, num_merges: options[:vocab_size])
+    Process.kill("TERM", spinner_pid) rescue nil
+    Process.wait(spinner_pid) rescue nil
+    print "\r\e[K"  # clear the spinner line
+  else
+    puts "\nTraining BPE tokenizer — #{options[:vocab_size]} merges."
+    tokenizer = Rinzler::Tokenizer::BPE.new.train(corpus, num_merges: options[:vocab_size])
+  end
   tokenizer.save(tokenizer_cache)
-  puts "  Vocabulary: #{tokenizer.vocab_size} tokens (#{options[:vocab_size]} merges + #{tokenizer.vocab_size - options[:vocab_size]} base chars). Saved to #{tokenizer_cache}."
+  puts "  Tokenizer ready — #{tokenizer.vocab_size} tokens. Saved to #{tokenizer_cache}."
 end
 
 all_ids = tokenizer.encode(corpus)
@@ -289,8 +300,7 @@ last_step   = start_step
     div_history << { step: step + 1, train: loss_val, val: val_loss, gap: gap }
 
     if critical
-      dashboard.emit("\nStopping early — divergence #{gap_pct}% exceeds critical threshold #{options[:div_crit]}% at step #{step + 1}.")
-      dashboard.emit("The train/val gap has widened past the point where continued training is likely to improve generalisation.")
+      dashboard.emit("Divergence #{gap_pct}% exceeds critical threshold #{options[:div_crit]}% at step #{step + 1}. Stopping.", style: :critical)
       stop_requested = true
     end
   end
@@ -300,9 +310,7 @@ last_step   = start_step
     prompt = tokenizer.encode("The ")
     ids    = model.generate(prompt, max_new_tokens: options[:gen_len], temperature: 0.8)
     sample = tokenizer.decode(ids)
-    dashboard.emit("\n--- sample at step #{step + 1} (temperature=0.8, autoregressive) ---")
-    dashboard.emit(sample)
-    dashboard.emit("---\n")
+    dashboard.emit("step #{step + 1} · temperature=0.8\n\n#{sample}", style: :sample)
   end
 
   # ── Checkpoint ───────────────────────────────────────────────────────────────
@@ -310,13 +318,13 @@ last_step   = start_step
     ckpt = options[:out].sub(".json", "_step#{step + 1}.json")
     model.save_checkpoint(ckpt, step: step + 1, optimizer: opt)
     tokenizer.save(ckpt.sub(".json", "_tokenizer.json"))
-    dashboard.emit("Checkpoint: #{ckpt}")
+    dashboard.emit("Checkpoint saved: #{ckpt}", style: :info)
   end
 
   last_step = step + 1
 
   if stop_requested
-    dashboard.emit("\nSignal received — stopping after step #{last_step}.")
+    dashboard.emit("Signal received — stopping after step #{last_step}.", style: :warn)
     break
   end
 end
