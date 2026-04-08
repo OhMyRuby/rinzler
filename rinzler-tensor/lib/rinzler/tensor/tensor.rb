@@ -452,6 +452,63 @@ module Rinzler
         out
       end
 
+      # ── Fused cross-entropy loss ──────────────────────────────────────────────
+
+      # Tensor.cross_entropy(logits, targets) → scalar Tensor
+      #
+      # logits:  Tensor [n, vocab_size]   (float logits, not probabilities)
+      # targets: Array of Integer         (correct class index per row, length n)
+      #
+      # Returns: scalar Tensor — mean NLL loss over all n rows.
+      #
+      # Why fused?
+      #   The naive chain is: log_softmax → (* one_hot) → sum(axis:1) → mean.
+      #   That's 5 backward nodes and allocates a full [n, vocab_size] one_hot
+      #   matrix (~10 MB at batch=8, context=128, vocab=1250).
+      #
+      #   This fuses everything into one node. The backward computes
+      #   d(CE)/d(logits) = (softmax(logits) - one_hot) / n  entirely in-place
+      #   via numo fancy indexing — no one_hot array, one backward node.
+      #
+      # The log_softmax / softmax duality on the integer-indexed path:
+      #   Forward uses log-space for numerical stability (no exp-then-log).
+      #   Backward uses softmax = exp(log_prob) which is already computed
+      #   during forward, so it's free to reuse.
+      def self.cross_entropy(logits, targets)
+        n     = logits.shape[0]
+        vocab = logits.shape[1]
+
+        # Numerically stable log-softmax
+        row_max  = logits.data.max(1).reshape(n, 1)
+        shifted  = logits.data - row_max
+        exp_s    = Numo::NMath.exp(shifted)
+        sum_exp  = exp_s.sum(1).reshape(n, 1)
+        log_prob = shifted - Numo::NMath.log(sum_exp)   # [n, vocab]
+        softmax  = exp_s / sum_exp                       # kept for backward
+
+        # Gather correct-class log-probs. Numo's [int_arr, int_arr] indexing does a
+        # cross-product (outer select), not element-wise — use flat indices instead.
+        flat_idx = Numo::Int32.cast(targets.each_with_index.map { |t, i| i * vocab + t })
+        flat_log = log_prob.reshape(n * vocab)
+        nll_val  = -flat_log[flat_idx].mean
+
+        out = Tensor.new(Numo::DFloat[nll_val], children: [logits], op: :cross_entropy)
+
+        out._set_backward do
+          # d(CE)/d(logits[i,j]) = softmax[i,j]/n        (j != target[i])
+          #                       = (softmax[i,j] - 1)/n  (j == target[i])
+          # One [n, vocab] allocation; single backward node.
+          # Note: numo reshape returns a copy, not a view — subtract at targets
+          # directly on the 2D array using Ruby iteration (O(n), n=B*T).
+          inv_n = 1.0 / n
+          grad  = softmax * inv_n
+          targets.each_with_index { |tid, i| grad[i, tid] -= inv_n }
+          logits.grad.inplace + grad
+        end
+
+        out
+      end
+
       # ── Backpropagation ───────────────────────────────────────────────────────
 
       def backward

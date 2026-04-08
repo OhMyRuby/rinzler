@@ -99,8 +99,16 @@ Approximate backward time distribution per step:
 
 `*` backward uses `TensorExt.mul_backward` when both operands have matching shapes — a single C loop accumulates into both `self.grad` and `other.grad` with no temporaries, halving memory traffic vs. the two-pass numo path. Mismatched shapes (scalar broadcast etc.) fall back to Ruby.
 
+## Fused cross-entropy loss
+
+`Tensor.cross_entropy(logits, targets)` replaces the naive `log_softmax → (* one_hot) → sum → mean` chain. That chain allocates a `[B*T, vocab_size]` one_hot matrix (~10 MB at training scale) and runs 5 separate backward nodes. The fused version:
+
+- Forward: numerically stable log-softmax then integer-indexed gather — no one_hot alloc
+- Backward: single node computing `(softmax(logits) - one_hot) / n` directly, with the target-position subtract done via Ruby iteration on the 2D grad array (O(B*T), no auxiliary allocation)
+
+Note: numo `reshape` returns a copy, not a view, so flat-index tricks don't work for in-place grad modification — the 2D iteration is the correct approach.
+
 ## Future optimization paths
 
 - **Pre-allocated gradient buffers** — currently `@grad` is initialized to zeros at Tensor construction and accumulated into via `inplace +`. A "double-buffer" scheme that reuses the same NArray across steps (zero it in `zero_grad!` rather than reallocating) would eliminate GC pressure on parameter tensors entirely.
-- **Fused log_softmax + NLL loss** — the cross-entropy backward is currently two nodes (`log_softmax` + gather via one-hot multiply). A single fused C backward that computes `softmax(x) - one_hot(target)` directly skips the intermediate allocation and halves the backward work for the output layer.
 - **Larger d_model** — most matmuls are below the BLAS threshold (256) at d_model=64. Increasing d_model to 128+ would route the QKV projection and FFN layers through OpenBLAS, giving a significant speedup on the dominant ops.

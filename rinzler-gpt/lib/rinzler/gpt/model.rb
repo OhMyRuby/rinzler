@@ -130,20 +130,10 @@ module Rinzler
         b, t   = seqs.size, targets[0].size
         logits = forward(inputs)                # [B, T, vocab_size]
 
-        # Flatten to [B*T, vocab_size] for row-wise log-softmax
-        log_probs = logits.reshape(b * t, @config.vocab_size).log_softmax
-
-        # One-hot target mask [B*T, vocab_size] — constant, no gradient needed.
-        # Row i has a single 1 at the column of the correct next token.
-        targets_flat = targets.flatten
-        one_hot      = Numo::DFloat.zeros(b * t, @config.vocab_size)
-        targets_flat.each_with_index { |tid, i| one_hot[i, tid] = 1.0 }
-
-        # Gather: multiply log_probs by the one-hot mask and sum across vocab dim.
-        # Each row collapses to a single scalar: the log-prob of the correct token.
-        nll = (log_probs * Rinzler::Tensor::Tensor.new(one_hot)).sum(axis: 1)
-
-        -nll.mean
+        # Fused cross-entropy: avoids one_hot allocation and 5-node backward chain.
+        # See Tensor.cross_entropy for derivation.
+        flat_logits = logits.reshape(b * t, @config.vocab_size)
+        Rinzler::Tensor::Tensor.cross_entropy(flat_logits, targets.flatten)
       end
 
       # Persist the model to disk.
