@@ -13,6 +13,8 @@ require_relative "lib/rinzler/gpt"
 require_relative "lib/rinzler/dashboard"
 require "optparse"
 require "fileutils"
+require "json"
+require "shellwords"
 
 $stdout.sync = true  # flush immediately when piped
 
@@ -70,6 +72,11 @@ OptionParser.new do |o|
     options[:corpus] = [] if options[:corpus] == [File.join(__dir__, "corpus/*.txt")]
     options[:corpus] << v
   end
+  o.on("--rails PATH") do |v|
+    options[:corpus] = [] if options[:corpus] == [File.join(__dir__, "corpus/*.txt")]
+    options[:rails] ||= []
+    options[:rails] << File.expand_path(v)
+  end
 end.parse!
 
 # ── Run directory ──────────────────────────────────────────────────────────────
@@ -97,15 +104,56 @@ tokenizer_cache = File.join(__dir__, "tokenizer_#{options[:vocab_size]}.json")
 
 # ── Data ───────────────────────────────────────────────────────────────────────
 
-files = options[:corpus].flat_map { |pat| Dir.glob(pat).sort }.uniq
-raise "No corpus files found for: #{options[:corpus].join(", ")}" if files.empty?
-
 puts "Loading corpus..."
-corpus = files.each_with_object(+"") do |path, buf|
-  text = File.read(path)
-  puts "  #{File.basename(path)}: #{text.size} chars"
-  buf << text
+corpus = +""
+
+# Plain text / glob corpus files
+unless options[:corpus].empty?
+  files = options[:corpus].flat_map { |pat| Dir.glob(pat).sort }.uniq
+  files.each do |path|
+    text = File.read(path, encoding: "utf-8", invalid: :replace, undef: :replace)
+    puts "  #{File.basename(path)}: #{text.size} chars"
+    corpus << text
+  end
 end
+
+# Rails app corpus — enumerate via git ls-files, prepend path headers
+(options[:rails] || []).each do |app_path|
+  unless Dir.exist?(app_path) && Dir.exist?(File.join(app_path, ".git"))
+    raise "#{app_path} is not a git repository"
+  end
+
+  rel = File.basename(app_path)
+  puts "  Rails app: #{rel}"
+
+  tracked = `git -C #{Shellwords.escape(app_path)} ls-files`.split("\n")
+  app_chars = 0
+  included  = 0
+
+  tracked.each do |rel_path|
+    full = File.join(app_path, rel_path)
+    next unless File.file?(full)
+
+    raw = File.binread(full)
+    # Skip binary files — heuristic: >10% non-UTF8-printable bytes in first 8KB
+    sample = raw[0, 8192] || ""
+    null_count = sample.count("\x00")
+    next if null_count > 0  # null bytes = binary for sure
+    next if sample.bytes.count { |b| b > 127 } > sample.size * 0.3
+
+    text = raw.force_encoding("utf-8").encode("utf-8", invalid: :replace, undef: :replace)
+    next if text.strip.empty?
+
+    chunk = "# #{rel_path}\n#{text}\n"
+    corpus << chunk
+    app_chars += chunk.size
+    included  += 1
+  end
+
+  puts "    #{included}/#{tracked.size} files, #{app_chars} chars"
+end
+
+raise "No corpus content found" if corpus.empty?
 puts "  total: #{corpus.size} characters"
 puts "  Pre-training on raw text. The data distribution is the prior — quality and diversity here determine the ceiling."
 
@@ -220,18 +268,53 @@ end
 
 puts "  Gradient clipping: max_norm=#{options[:clip_grad]}." if options[:clip_grad]
 
-# ── Training loop ──────────────────────────────────────────────────────────────
+# ── Dashboard / output setup ───────────────────────────────────────────────────
+#
+# If rinzler-dashboard is on PATH and stdout is a TTY, spawn it and pipe JSONL
+# to it. Otherwise fall back to the Ruby TUI dashboard (or plain text if not TTY).
 
-puts "\nTraining — #{options[:steps]} steps, cross-entropy loss, next-token prediction.\n\n"
+DASH_BIN = File.expand_path("../../rinzler-dashboard/rinzler-dashboard", __FILE__)
+
+def emit_event(io, hash)
+  io.puts JSON.generate(hash)
+  io.flush
+rescue Errno::EPIPE
+  # Dashboard closed its end of the pipe (e.g. user quit the TUI).
+  # Swallow silently — training continues, events are just dropped.
+end
+
+run_dir = File.dirname(File.expand_path(options[:out]))
+
+dash_io   = nil   # pipe IO to the Go dashboard, or nil
+dashboard = nil   # Ruby dashboard fallback
+
+if $stdout.isatty && File.exist?(DASH_BIN)
+  # Spawn Go dashboard, pipe our JSONL into its stdin.
+  dash_io = IO.popen([DASH_BIN, File.basename(run_dir)], "w")
+else
+  dashboard = Rinzler::Dashboard.new(
+    total_steps: options[:steps],
+    start_step:  start_step,
+    run_dir:     run_dir,
+    start_time:  Time.now
+  )
+  dashboard.start!
+end
+
+def emit(dash_io, dashboard, hash, ruby_style: nil, ruby_text: nil)
+  if dash_io
+    emit_event(dash_io, hash)
+  elsif dashboard
+    if ruby_text
+      dashboard.emit(ruby_text, style: ruby_style)
+    elsif hash[:message]
+      dashboard.emit(hash[:message], style: ruby_style)
+    end
+  end
+end
+
+puts "\nTraining — #{options[:steps]} steps, cross-entropy loss, next-token prediction.\n\n" unless dash_io
 start_time = Time.now
-
-dashboard = Rinzler::Dashboard.new(
-  total_steps: options[:steps],
-  start_step:  start_step,
-  run_dir:     File.dirname(File.expand_path(options[:out])),
-  start_time:  start_time
-)
-dashboard.start!
 
 # Graceful shutdown on SIGINT (Ctrl-C) or SIGTERM.
 # Sets a flag rather than raising — the loop checks it at the end of each step
@@ -273,34 +356,44 @@ last_step   = start_step
 
     # Trend: change in gap vs div_window evals ago
     trend_delta = nil
+    val_rising  = false
     if div_history.size >= options[:div_window]
-      prev_gap    = div_history[-options[:div_window]][:gap]
+      prev        = div_history[-options[:div_window]]
+      prev_gap    = prev[:gap]
       trend_delta = (gap - prev_gap).round(4)
+      # Val is "rising" only if it's higher than it was div_window evals ago —
+      # meaning the model is getting worse on validation data, not just that
+      # train loss is pulling away from a stable val.
+      val_rising = val_loss > prev[:val]
     end
 
     warning  = gap_pct > options[:div_warn]
-    critical = options[:div_crit] && gap_pct > options[:div_crit]
+    # Critical requires gap threshold AND val loss actually trending upward.
+    # A growing gap while val is stable or improving is normal overfit, not runaway.
+    critical = options[:div_crit] && gap_pct > options[:div_crit] && val_rising
 
     current_lr = scheduler.respond_to?(:lr) ? scheduler.lr : options[:lr]
 
-    dashboard.update(
-      step:      step + 1,
-      train:     loss_val,
-      val:       val_loss,
-      gap:       gap,
-      gap_pct:   gap_pct,
-      trend:     trend_delta,
-      lr:        current_lr,
-      grad_norm: grad_norm,
-      elapsed:   elapsed,
-      warning:   warning,
-      critical:  critical
-    )
+    if dash_io
+      emit_event(dash_io, {
+        type: "eval", step: step + 1, total: options[:steps],
+        train: loss_val, val: val_loss, gap: gap, gap_pct: gap_pct,
+        trend: trend_delta, lr: current_lr, grad_norm: grad_norm.to_f,
+        elapsed: elapsed, warning: warning, critical: critical
+      })
+    elsif dashboard
+      dashboard.update(
+        step: step + 1, train: loss_val, val: val_loss, gap: gap,
+        gap_pct: gap_pct, trend: trend_delta, lr: current_lr,
+        grad_norm: grad_norm, elapsed: elapsed, warning: warning, critical: critical
+      )
+    end
 
     div_history << { step: step + 1, train: loss_val, val: val_loss, gap: gap }
 
     if critical
-      dashboard.emit("Divergence #{gap_pct}% exceeds critical threshold #{options[:div_crit]}% at step #{step + 1}. Stopping.", style: :critical)
+      msg = "Divergence #{gap_pct}% exceeds critical threshold #{options[:div_crit]}% at step #{step + 1}. Stopping."
+      emit(dash_io, dashboard, { type: "critical", message: msg }, ruby_style: :critical)
       stop_requested = true
     end
   end
@@ -310,7 +403,9 @@ last_step   = start_step
     prompt = tokenizer.encode("The ")
     ids    = model.generate(prompt, max_new_tokens: options[:gen_len], temperature: 0.8)
     sample = tokenizer.decode(ids)
-    dashboard.emit("step #{step + 1} · temperature=0.8\n\n#{sample}", style: :sample)
+    emit(dash_io, dashboard,
+         { type: "sample", step: step + 1, text: sample },
+         ruby_style: :sample, ruby_text: "step #{step + 1} · temperature=0.8\n\n#{sample}")
   end
 
   # ── Checkpoint ───────────────────────────────────────────────────────────────
@@ -318,30 +413,46 @@ last_step   = start_step
     ckpt = options[:out].sub(".json", "_step#{step + 1}.json")
     model.save_checkpoint(ckpt, step: step + 1, optimizer: opt)
     tokenizer.save(ckpt.sub(".json", "_tokenizer.json"))
-    dashboard.emit("Checkpoint saved: #{ckpt}", style: :info)
+    emit(dash_io, dashboard,
+         { type: "checkpoint", step: step + 1, path: ckpt },
+         ruby_style: :info, ruby_text: "Checkpoint saved: #{ckpt}")
   end
 
   last_step = step + 1
 
   if stop_requested
-    dashboard.emit("Signal received — stopping after step #{last_step}.", style: :warn)
+    emit(dash_io, dashboard,
+         { type: "warn", message: "Signal received — stopping after step #{last_step}." },
+         ruby_style: :warn)
     break
   end
 end
 
 elapsed = (Time.now - start_time).round(1)
-dashboard.stop!
-puts "\nTraining complete in #{elapsed}s."
+
+if dash_io
+  emit_event(dash_io, { type: "done", step: last_step, elapsed: elapsed })
+  dash_io.close
+  Process.wait rescue nil
+else
+  dashboard&.stop!
+  puts "\nTraining complete in #{elapsed}s."
+end
 
 model.save_checkpoint(options[:out], step: last_step, optimizer: opt)
 tokenizer.save(options[:out].sub(".json", "_tokenizer.json"))
-puts "Final checkpoint: #{options[:out]}"
+puts "Final checkpoint: #{options[:out]}" unless dash_io
 
 # ── Generate final sample ──────────────────────────────────────────────────────
 unless stop_requested
-  puts "\n--- final generation (temperature=0.8) ---"
   prompt = tokenizer.encode("Ruby is ")
   ids    = model.generate(prompt, max_new_tokens: 300, temperature: 0.8)
-  puts tokenizer.decode(ids)
-  puts "---"
+  if dash_io
+    # dash_io already closed — just print to terminal directly
+    puts tokenizer.decode(ids)
+  else
+    puts "\n--- final generation (temperature=0.8) ---"
+    puts tokenizer.decode(ids)
+    puts "---"
+  end
 end

@@ -21,6 +21,9 @@ rinzler-vulkan/*.bundle
 **/*.o
 **/*.spirv
 
+# ── Go build artifacts ────────────────────────────────────────────────────────
+rinzler-dashboard/rinzler-dashboard
+
 # ── Tooling ────────────────────────────────────────────────────────────────────
 .yardoc/
 _yardoc/
