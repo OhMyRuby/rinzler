@@ -108,10 +108,16 @@ module Rinzler
         out   = Tensor.new(@data * other.data, children: [self, other], op: :*)
 
         # Element-wise multiply: d(a*b)/da = b, d(a*b)/db = a.
-        # Same broadcast handling as addition.
+        # Fast path: when shapes match, one C pass accumulates both grads
+        # simultaneously (no temporaries, half the memory traffic).
+        # Broadcast path: fall back to Ruby unbroadcast for mismatched shapes.
         out._set_backward do
-          self.grad.inplace  + unbroadcast(other.data * out.grad, shape)
-          other.grad.inplace + unbroadcast(@data * out.grad, other.shape)
+          if TENSOR_NATIVE && shape == other.shape
+            Rinzler::Tensor::TensorExt.mul_backward(@data, other.data, out.grad, self.grad, other.grad)
+          else
+            self.grad.inplace  + unbroadcast(other.data * out.grad, shape)
+            other.grad.inplace + unbroadcast(@data * out.grad, other.shape)
+          end
         end
 
         out

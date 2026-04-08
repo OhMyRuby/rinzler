@@ -112,10 +112,56 @@ static VALUE rb_bmm(VALUE self, VALUE rb_a, VALUE rb_b) {
     return rb_c;
 }
 
+/*
+ * TensorExt.mul_backward(a, b, out_grad, a_grad, b_grad) → nil
+ *
+ * Fused elementwise multiply backward. Single pass computes:
+ *   a_grad[i] += b[i] * out_grad[i]
+ *   b_grad[i] += a[i] * out_grad[i]
+ *
+ * The Ruby path allocates two temporaries (b*og and a*og) and traverses the
+ * data twice. This kernel eliminates both allocations and halves memory
+ * traffic — one read of out_grad serves both accumulations.
+ *
+ * All five arrays must be same-shape contiguous Numo::DFloat. The caller
+ * (Tensor#* backward) guards this with a shape-equality check and falls
+ * back to Ruby for the broadcast case.
+ *
+ * a_grad and b_grad are mutated in place — callers must not pass frozen arrays.
+ */
+static VALUE rb_mul_backward(VALUE self,
+                              VALUE rb_a,  VALUE rb_b,
+                              VALUE rb_og, VALUE rb_ag, VALUE rb_bg) {
+    rb_a  = ensure_contiguous(rb_a);
+    rb_b  = ensure_contiguous(rb_b);
+    rb_og = ensure_contiguous(rb_og);
+    rb_ag = ensure_contiguous(rb_ag);
+    rb_bg = ensure_contiguous(rb_bg);
+
+    narray_t *na;
+    GetNArray(rb_a, na);
+    long n = 1;
+    for (int i = 0; i < na->ndim; i++) n *= (long)na->shape[i];
+
+    const double *a  = (const double *)RNARRAY_DATA_PTR(rb_a);
+    const double *b  = (const double *)RNARRAY_DATA_PTR(rb_b);
+    const double *og = (const double *)RNARRAY_DATA_PTR(rb_og);
+    double       *ag = (double *)RNARRAY_DATA_PTR(rb_ag);
+    double       *bg = (double *)RNARRAY_DATA_PTR(rb_bg);
+
+    for (long i = 0; i < n; i++) {
+        ag[i] += b[i] * og[i];
+        bg[i] += a[i] * og[i];
+    }
+
+    return Qnil;
+}
+
 void Init_tensor_ext(void) {
     VALUE mRinzler = rb_define_module("Rinzler");
     VALUE mTensor  = rb_define_module_under(mRinzler, "Tensor");
     VALUE mExt     = rb_define_module_under(mTensor, "TensorExt");
 
-    rb_define_module_function(mExt, "bmm", rb_bmm, 2);
+    rb_define_module_function(mExt, "bmm",          rb_bmm,          2);
+    rb_define_module_function(mExt, "mul_backward", rb_mul_backward, 5);
 }
