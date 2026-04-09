@@ -358,6 +358,36 @@ module Rinzler
 
       # ── Activations ───────────────────────────────────────────────────────────
 
+      # Fused GELU (tanh approximation, Hendrycks & Gimpel 2016).
+      #
+      # GELU(x) = 0.5 · x · (1 + tanh(√(2/π) · (x + 0.044715·x³)))
+      #
+      # Replaces the ~8-node graph that the naive expansion produces
+      # (h**3, *, +, *, tanh, *, *, +), collapsing all intermediate
+      # [B*T, d_ffn] allocations to a single node.
+      #
+      # Backward (chain rule through tanh):
+      #   let u = √(2/π)·(x + 0.044715·x³),  t = tanh(u)
+      #   dGELU/dx = 0.5·(1+t) + 0.5·x·(1-t²)·√(2/π)·(1 + 0.134145·x²)
+      GELU_COEF = Math.sqrt(2.0 / Math::PI)
+
+      def gelu
+        x    = @data
+        u    = (x + x ** 3 * 0.044715) * GELU_COEF
+        t    = Numo::NMath.tanh(u)
+        y    = x * 0.5 * (1.0 + t)
+
+        out = Tensor.new(y, children: [self], op: :gelu)
+
+        out._set_backward do
+          sech2 = 1.0 - t ** 2
+          du_dx = GELU_COEF * (1.0 + x ** 2 * 0.134145)
+          self.grad.inplace + (0.5 * (1.0 + t + x * sech2 * du_dx) * out.grad)
+        end
+
+        out
+      end
+
       def relu
         out = Tensor.new(@data.clip(0, Float::INFINITY), children: [self], op: :relu)
 
